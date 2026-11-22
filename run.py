@@ -37,6 +37,7 @@ IMGSZ = 640
 CONF = 0.4
 
 _END = object()
+LETTERBOX = None  # ultralytics LetterBox(640, auto=True, stride=32): identical to the predictor's rect letterbox
 
 
 def pick_indices(n, k):
@@ -103,7 +104,7 @@ def decode_video(key, data, k, out_q, chunk):
         nonlocal pend_secs, pend_imgs
         for i in pick_indices(len(buf), k):
             pend_secs.append(buf_sec)
-            pend_imgs.append(to_model_input(buf[i], rot))
+            pend_imgs.append(LETTERBOX(image=to_model_input(buf[i], rot)))
         if len(pend_imgs) >= chunk:
             out_q.put(("frames", key, pend_secs, pend_imgs))
             pend_secs, pend_imgs = [], []
@@ -231,7 +232,9 @@ class Aggregator:
         self.n_videos += 1
 
 
+
 def main():
+    global LETTERBOX
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
@@ -246,27 +249,45 @@ def main():
 
     import torch
     from ultralytics import YOLO
+    from ultralytics.data.augment import LetterBox
+    from ultralytics.utils import nms
 
     k = args.fps_samples if args.fps_samples > 0 else 10**9
     device = 0 if torch.cuda.is_available() else "cpu"
     half = bool(args.half) and device == 0
     model = YOLO(args.weights if os.path.exists(args.weights) else "yolo11l.pt")
+    # one normal predictor call builds the exact AutoBackend (fused, fp16) that predict() uses
+    model.predict([np.zeros((384, 640, 3), np.uint8)] * 2, imgsz=IMGSZ, conf=CONF, iou=0.7, classes=CLASS_IDS,
+                  quantize=16 if half else None, device=device, verbose=False, batch=2)
+    backend = model.predictor.model
+    st = backend.stride
+    stride = int(max(st)) if hasattr(st, "__len__") else int(st)
+    LETTERBOX = LetterBox((IMGSZ, IMGSZ), auto=True, stride=stride)
+    end2end = getattr(backend, "end2end", False)
+    dev = model.predictor.device
 
+    @torch.inference_mode()
     def infer(imgs):
-        res = model.predict(imgs, imgsz=IMGSZ, conf=CONF, iou=0.7, classes=CLASS_IDS, quantize=16 if half else None,
-                            device=device, verbose=False, batch=len(imgs))
+        # == BasePredictor.preprocess (images already letterboxed) + inference + DetectionPredictor NMS
+        im = torch.from_numpy(np.stack(imgs)).to(dev)
+        im = im.permute(0, 3, 1, 2).contiguous().flip(1)
+        im = (im.half() if backend.fp16 else im.float()).div_(255)
+        preds = backend(im)
+        dets = nms.non_max_suppression(preds, CONF, 0.7, CLASS_IDS, False, max_det=300, nc=0, end2end=end2end)
         out = []
-        for r in res:
-            cls = r.boxes.cls.int().tolist() if r.boxes is not None else []
+        for d in dets:
+            cls = d[:, 5].int().tolist()
             out.append((sum(1 for c in cls if c == 0), frozenset(cls)))
         return out
 
-    infer([np.zeros((360, 640, 3), np.uint8)] * 2)  # warm-up
+    infer([LETTERBOX(image=np.zeros((360, 640, 3), np.uint8))] * 2)  # warm-up
 
-    out_q = queue.Queue(maxsize=48)
+    out_q = queue.Queue(maxsize=64)
+    gpu_q = queue.Queue(maxsize=2)    # batches waiting for the GPU thread
+    res_q = queue.Queue()             # results back from the GPU thread
     inflight = threading.Semaphore(args.workers * 2)
     pool = ThreadPoolExecutor(max_workers=args.workers)
-    state = {"submitted": 0, "done_reading": False}
+    state = {"submitted": 0}
 
     def task(key, data):
         try:
@@ -287,46 +308,102 @@ def main():
                 state["submitted"] += 1
                 pool.submit(task, key, data)
         finally:
-            state["done_reading"] = True
             out_q.put(("reader_done",))
+
+    def gpu_worker():
+        while True:
+            item = gpu_q.get()
+            if item is None:
+                return
+            tags, imgs = item
+            try:
+                dets = infer(imgs)
+            except Exception as e:
+                print(f"inference error: {e}", file=sys.stderr)
+                dets = [(0, frozenset())] * len(imgs)
+            res_q.put((tags, dets))
 
     t_start = time.time()
     threading.Thread(target=reader, daemon=True).start()
+    threading.Thread(target=gpu_worker, daemon=True).start()
 
-    finished = 0
-    frames_done = 0
+    buckets = {}          # padded shape -> ([(key, sec)], [img])
+    pending = {}          # key -> frames sent to the GPU but not back yet
+    ended = {}            # key -> (n_seconds, error) once its decoder has finished
+    counters = {"finished": 0, "frames": 0}
     reader_done = False
+
+    def dispatch(shape):
+        tags, imgs = buckets.pop(shape)
+        gpu_q.put((tags, imgs))
+
     with open(args.output, "w", buffering=1 << 20) as f:
         agg = Aggregator(f)
+
+        def finish(key, n_seconds, error):
+            pending.pop(key, None)
+            agg.finish(key, n_seconds, error)
+            counters["finished"] += 1
+
+        def drain_results(block=False):
+            while True:
+                try:
+                    tags, dets = res_q.get(timeout=0.5) if block else res_q.get_nowait()
+                except queue.Empty:
+                    return
+                block = False
+                touched = set()
+                for (key, sec), det in zip(tags, dets):
+                    agg.add(key, [sec], [det])
+                    pending[key] -= 1
+                    touched.add(key)
+                counters["frames"] += len(tags)
+                for key in touched:
+                    if pending[key] == 0 and key in ended:
+                        finish(key, *ended.pop(key))
+
         last_log = time.time()
         while True:
-            if reader_done and finished >= state["submitted"]:
+            drain_results()
+            if reader_done and counters["finished"] >= state["submitted"]:
                 break
-            msg = out_q.get()
+            try:
+                msg = out_q.get(timeout=0.02)
+            except queue.Empty:
+                msg = None
+            if msg is None:
+                # decoders are idle: push out partial batches so nothing waits forever
+                for shape in list(buckets):
+                    dispatch(shape)
+                if reader_done and counters["finished"] < state["submitted"]:
+                    drain_results(block=True)
+                continue
             if msg[0] == "reader_done":
                 reader_done = True
-                continue
-            if msg[0] == "frames":
+            elif msg[0] == "frames":
                 _, key, secs, imgs = msg
-                try:
-                    dets = infer(imgs)
-                except Exception as e:
-                    print(f"inference error on {key}: {e}", file=sys.stderr)
-                    dets = [(0, frozenset())] * len(imgs)
-                agg.add(key, secs, dets)
-                frames_done += len(imgs)
+                pending[key] = pending.get(key, 0) + len(imgs)
+                for s, im in zip(secs, imgs):
+                    b = buckets.setdefault(im.shape, ([], []))
+                    b[0].append((key, s))
+                    b[1].append(im)
+                    if len(b[1]) >= args.batch:
+                        dispatch(im.shape)
             else:
                 _, key, n_seconds, error = msg
-                agg.finish(key, n_seconds, error)
-                finished += 1
+                if pending.get(key, 0) == 0:
+                    finish(key, n_seconds, error)
+                else:
+                    ended[key] = (n_seconds, error)
             if time.time() - last_log > 30:
                 el = time.time() - t_start
-                print(f"[{el:7.0f}s] videos {finished}/{state['submitted']} frames {frames_done} "
-                      f"({frames_done / el:.0f} fps) errors {agg.n_errors}", file=sys.stderr, flush=True)
+                print(f"[{el:7.0f}s] videos {counters['finished']}/{state['submitted']} frames {counters['frames']} "
+                      f"({counters['frames'] / el:.0f} fps) errors {agg.n_errors}", file=sys.stderr, flush=True)
                 last_log = time.time()
+    gpu_q.put(None)
     pool.shutdown(wait=True)
     el = time.time() - t_start
-    print(f"done: {finished} videos, {frames_done} frames, {agg.n_errors} errors in {el:.0f}s",
+    print(f"done: {counters['finished']} videos, {counters['frames']} frames, {agg.n_errors} errors in {el:.0f}s",
           file=sys.stderr)
 
 
