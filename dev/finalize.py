@@ -58,16 +58,24 @@ open("HARDWARE.md", "w").write(hw)
 print("HARDWARE.md:", txt)
 
 # 3. AI chats
-src = os.path.expanduser("~/.claude/projects/c--Users-junai-Development-ALETHIA-AI")
+USER = os.path.basename(os.path.expanduser("~"))  # Windows user-folder name, never hard-coded
+src = os.path.expanduser("~/.claude/projects/" + re.sub(r"[^A-Za-z0-9]", "-", ROOT))
 os.makedirs("ai_chats/claude_code", exist_ok=True)
 tok = re.compile(r"hf_[A-Za-z0-9]{6,}")  # full tokens and partial fragments
-# personal identifiers (not code-relevant): email address and the Windows user folder name
+# personal identifiers (not code-relevant): email addresses and the Windows user-folder name
 personal = [
-    (re.compile(r"[A-Za-z0-9._%+-]+@gmail\.com"), "[REMOVED_EMAIL]"),
-    (re.compile(r"(?i)(Users[\\/]+)junai\b"), r"\1[USER]"),
-    (re.compile(r"(?i)\bc--Users-junai-"), "c--Users-[USER]-"),
-    (re.compile(r"\bjunai(?= )"), "[USER]"),  # `ls -la` owner column
+    (re.compile(r"[A-Za-z0-9._%+-]+@(?!anthropic\.com)[A-Za-z0-9.-]+\.[a-z]{2,}"), "[REMOVED_EMAIL]"),
+    (re.compile(re.escape(USER) + r"(?![a-z])"), "[USER]"),
 ]
+try:  # local part of my email (from git config, never hard-coded), e.g. when it appears without the @domain
+    import subprocess
+    _local = subprocess.run(["git", "config", "user.email"], capture_output=True, text=True).stdout.strip()
+    _local = _local.split("@")[0]
+    for _part in {_local, re.split(r"[._+-]", _local)[0]}:  # full local part and its name-only prefix
+        if len(_part) >= 6:
+            personal.append((re.compile(re.escape(_part), re.I), "[REMOVED_EMAIL]"))
+except Exception:
+    pass
 for p in glob.glob(os.path.join(src, "*.jsonl")):
     s = open(p, encoding="utf-8").read()
     s, n = tok.subn("[REMOVED]", s)
