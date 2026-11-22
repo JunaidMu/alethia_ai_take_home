@@ -1,0 +1,13 @@
+.venv/
+finevideo/
+parts/
+val/
+__pycache__/
+*.pt
+*.engine
+results.jsonl
+full_run.log
+# private / not part of the submission
+AI_Engineering_TakeHome_Brief.pdf
+Response Email.docx
+Legion_Pro_5_*.pdf
