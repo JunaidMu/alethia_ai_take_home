@@ -5,5 +5,3 @@
 Only these edits were made:
 - Hugging Face access tokens (and partial fragments of one) -> `[REMOVED]`
 - my email address -> `[REMOVED_EMAIL]`, and my Windows user-folder name in file paths -> `[USER]` (privacy only; nothing else was changed or removed).
-
-No other AI tools were used.

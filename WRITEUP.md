@@ -1,0 +1,19 @@
+Q1)
+So, luckily, I didn’t waste a lot of time on my version 1, because the moment the v1 ran, I could clearly estimate that it was going to take roughly 3 hours to run on all 50 files. So, discussing with claude code, I decided that we utilize the gpu better. That’s what I did, making batches of frames, management of frames in parallel and using a dedicated gpu thread inference combined was my single most significant change. My faster version took 2 hours 11 minutes, which is saving us time and the 49 minutes of computational resources.
+
+Q2)
+So, my pipeline first opens the Parquet files using pyarrow and pulls the mp4 data from each row. From there, it passes those video bytes to decoder workers using pyav to extract the frames. I group them by second using their timestamps and pick three evenly spaced frames per second. Before inference, I apply rotation metadata, resize them to a max dimension of 640 pixels, and run Ultralytics' LetterBox preprocessing.
+After that, I group frames with matching dimensions into batches of up to 64, even across different videos. A separate gpu worker then runs YOLO11l inference using FP16, followed by nms to filter out everything except the five classes we need. At the end, I aggregate detections per second using majority voting for objects and the median for people count, and write each result as a JSONL line.
+
+
+Q3)
+So, in my final version, gpu inference is easily the part that takes the most time. To actually measure this, I tested the different stages on their own to see how fast each one was. On my test videos, decoding alone reached around 27,000 frames per second, whereas the model only did about 188 frames per second with batches of 64. Then, during the actual run, I monitored gpu utilization using nvidia-smi, and it stayed between 91 and 100% while using roughly 6.5 gb of vram. The full pipeline ended up running at around 179 frames per second, which is really close to the model-only speed. That basically shows inference is the main bottleneck and decoding or the other stages are not slowing things down. On top of that, loading the model takes about 20 seconds whenever the script starts.
+
+Q4)
+So, to make sure my faster script was still giving the right results, I first tested different sampling rates against an every-frame reference on 12 videos. One or two frames per second didn't hit the exact people-count threshold, while three frames per second passed all three metrics. After that, I ran my optimized version against my original script that used Ultralytics' model.predict() on those same videos, and both got 1.0000 agreement on all three metrics. I also threw in some damaged and truncated videos to check error handling, and both versions gave byte-identical outputs for those too.
+
+Q5)
+So, when my v1 run looked too slow for the deadline, the AI suggested doing a mid-run swap by replacing run.py with my faster version while it was still running. That meant the first batch would finish on the old code and the rest on the new one. I rejected this because the final results would be a mix of two different code versions, and the recorded run time would be a blend instead of the honest time of my submitted script. I just stopped v1 and restarted from scratch, losing only about 22 minutes while keeping my results and timing accurate.
+Q6)
+If I had one more week, the first thing I'd do is try exporting the model to tensorrt with FP16, since inference is clearly the main bottleneck right now. I'd probably also look into nvidia's nvdec for gpu decoding, even though decoding is already pretty fast. I'd also want to experiment with adaptive sampling so the script processes fewer frames when consecutive seconds look mostly the same. On top of that, I'd spend more time testing the pipeline on weird edge cases, like unusual resolutions, rotation metadata, or corrupted videos, just to make sure the whole thing is more reliable.
+

@@ -85,8 +85,7 @@ open("ai_chats/README.md", "w").write(
     "Only these edits were made:\n"
     "- Hugging Face access tokens (and partial fragments of one) -> `[REMOVED]`\n"
     "- my email address -> `[REMOVED_EMAIL]`, and my Windows user-folder name in file paths -> `[USER]` "
-    "(privacy only; nothing else was changed or removed).\n\n"
-    "No other AI tools were used.\n")
+    "(privacy only; nothing else was changed or removed).\n")
 leftover = [p for p in glob.glob("ai_chats/**/*", recursive=True)
             if os.path.isfile(p) and tok.search(open(p, encoding="utf-8", errors="ignore").read())]
 assert not leftover, leftover
