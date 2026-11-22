@@ -8,7 +8,7 @@
 | CPU | Intel Core Ultra 9 275HX — 24 cores (8P + 16E) / 24 threads, up to 5.4 GHz |
 | RAM | 32 GB DDR5-5600 (2 × 16 GB) |
 | Disk | 1 TB M.2 PCIe 4.0 x4 NVMe SSD |
-| OS | Windows 11 Home (Python 3.12, torch 2.11.0+cu128, ultralytics 8.4.216, PyAV 19.0.2) |
+| OS | Windows 11 Home (Python 3.12, torch 2.11.0+cu128, ultralytics 8.4.216, PyAV 19.0.2, numpy 2.5.4; `requirements.txt` pins av 18.1.1 / numpy 2.4.6 because the newer ones have no Python 3.11 wheels — numpy 2.4.6 re-verified identical on the validation videos) |
 
 ## Full run time
 

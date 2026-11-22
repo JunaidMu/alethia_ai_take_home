@@ -2,8 +2,8 @@
 torch==2.11.0+cu126
 torchvision==0.26.0+cu126
 ultralytics==8.4.216
-av==19.0.2
+av==18.1.1
 pyarrow==26.0.1
-numpy==2.5.4
+numpy==2.4.6
 opencv-python==5.1.0.95
 huggingface_hub==2.4.0
